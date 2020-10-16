@@ -1,0 +1,277 @@
+# used for manipulating directory paths
+import os
+
+# Scientific and vector computation for python
+import numpy as np
+
+# Plotting library
+from matplotlib import pyplot
+
+# tells matplotlib to embed plots within the notebook
+%matplotlib inline
+
+#Fast AI
+from fastai.vision import *
+
+# Pytorch
+import torch
+
+# modules to dataset
+from torchvision import transforms, models
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader, random_split
+
+# modules to adequate the NN
+from torch import nn
+from torch import optim
+
+# Measuring execution time
+import time
+
+#Verificando disponibilidade da GPU
+def testar_gpu():
+	train_on_gpu = torch.cuda.is_available() #Observa se a GPU está disponivel
+	if train_on_gpu: #Se sim
+		device = torch.device('cuda') #Seleciona o device como GPU
+		print("Treinando na GPU") #E manda a mensagem
+	else: #Se não
+		device = torch.device('cpu') #Seleciona o device como cpu
+		print("GPU indisponível, treinando na CPU") #E avisa que a GPU não esta disponível
+	return device
+
+device = testar_gpu()
+
+#Download das imagens para criação do Dataset
+
+
+path = Path('/content/drive/My Drive/IMLDL/Desafio Final/')
+
+#Foram criados os labels de forma a serem classificados em ordem
+image = ['0Ferrari_Enzo', '1Uno_Way', '2Hummer_H1', '3Kawasaki_Ninja', '4Volkswagen_Worker', '5Estrada_Vazia']
+
+#Loop que irá definir, para cada Label, a origem e o destino do download das imagens bem como realizar o mesmo.
+for i in range(0, 6):
+  data = "dataset/"
+  name = image[i]
+  
+  ext = ".csv"
+  folder_dest = (data+""+name)
+  file = (name+""+ext)
+  
+  dest = os.path.join(path, folder_dest)
+  src = os.path.join(path, file)
+   
+  #Não é necessário executar novamente. As imagens já foram baixadas para o notebook e foram filtradas posteriormente
+  #download_images(src, dest, max_pics=400)
+  files = list(get_image_files(dest))
+  print('Label', name)
+  print('Number of images:', len(files))
+  
+  #ajuste do dataset
+transform = transforms.Compose([transforms.Resize((224,224)), transforms.RandomHorizontalFlip(), transforms.RandomRotation(10), transforms.ToTensor()])
+data = ImageFolder('/content/drive/My Drive/IMLDL/Desafio Final/dataset', transform=transform)
+
+#divisão para treino e validação
+print('Total de imagens no dataset:', len(data))
+percentage = 60 #60 
+n_treino = round(len(data)* (percentage/100))
+n_teste = round(len(data)* (100 - percentage)/(2*100))
+n_valid = len(data) - n_treino - n_teste
+
+print('nº de imagens para treino: {:}'.format(n_treino) +'; nº de imagens para teste: {:}'.format(n_teste) +'; nº de imagens para validação: {:}'.format(n_valid) + '.')
+train_data, test_data, valid_data = random_split(data, [n_treino, n_teste, n_valid], generator=torch.Generator().manual_seed(42))
+
+#Criação do Dataloader
+batch_size = 100
+loader_train, loader_test, loader_valid = DataLoader(train_data, batch_size=batch_size), DataLoader(test_data, batch_size=1), DataLoader(valid_data, batch_size=1)
+
+def importNN():
+
+    # https://pytorch.org/docs/stable/torchvision/models.html
+    
+    model = models.resnet50(pretrained=True)  # Escolher modelo que será utilizado no transfer learning.
+    for param in model.parameters():
+      param.requires_grad = False  # Desativa o treinamento das primeiras camadas da rede,
+                                   # pois elas já são previamente treinadas (transfer learning)
+
+    classifier = nn.Sequential(nn.Linear(2048,256),  # Escolher a dimensão de "contato" entre a rede pré-treinada e a fully-conected layer.
+                               nn.ReLU(),            # Escolher funções de ativação entre as camadas, e também o número de camadas.
+                               nn.Dropout(p=0.2),
+                               nn.Linear(256,6),
+                               nn.LogSoftmax(dim=1))
+
+    # Altera as últimas camadas do modelo, que serão treinadas.
+    # Agora nosso modelo tem uma saída de 6 valores, como o problema pede.
+    model.fc = classifier  
+
+    return model
+    
+# Coloca o modelo na GPU, se possível.
+model = importNN().to(device)
+
+def define(model, lr):
+    
+    # Escolher função de custo e algoritmo de otimização.
+    # Escolhemos a Negative Log Likelihood Loss como função de custo, já conhecida no curso.
+    # Como algoritmo de otimização, utilizamos o AdamW, que costuma convergir
+    # mais rápido do que o SGD.
+    criterion = nn.NLLLoss()                                                      
+    optimizer = torch.optim.AdamW(model.fc.parameters(), lr=lr)
+
+    return optimizer, criterion
+    
+def train_test(model, loader_train, loader_test):
+
+  train_loss,test_loss,acc = 0,0,0  # Inicializa variáveis necessárias.
+
+  model.train()  # Coloca em modo de treinamento.
+  for imagem_treino,label_treino in loader_train:  # Loop pelos batchs.
+
+    loss = 0
+    
+    # Coloca as imagens e labels na GPU, se possível.
+    imagem_treino, label_treino = imagem_treino.float().to(device), label_treino.to(device)
+    outputs = model(imagem_treino)  # Calcula a saída da rede para o batch.
+    loss = criterion(outputs, label_treino.float().long()) # Calcula o erro da rede.
+    
+    optimizer.zero_grad()  # Zera o gradiente, pois o PyTorch acumula a cada iteração.
+    loss.backward()  # Faz o backpropagation.
+    optimizer.step()  # Atualiza os pesos (parâmetros).
+    train_loss += loss
+	
+  train_loss = train_loss/len(loader_train) # Calcula o erro para o treino.
+
+  # Coloca em modo de avaliação, pois não queremos que o modelo faça Dropout, 
+  # por exemplo, que é algo feito em fase de treinamento.
+  model.eval()  
+
+  correct = 0
+  total = 0
+  test_loss = 0
+	
+  # Não é necessário calcular o gradiente em fase de avaliação.
+  with torch.no_grad():  
+	  for imagem_teste, label_teste in loader_test: # Loop pelos batchs de teste.
+    
+      # Coloca as imagens e labels na GPU, se possível.
+		  imagem_teste, label_teste = imagem_teste.float().to(device), label_teste.to(device)
+		  outputs_test = model(imagem_teste)  # Calcula a saída da rede para o batch.
+	 
+		  _,previsao = torch.max(outputs_test, dim = 1)
+		  test_loss += criterion(outputs_test, label_teste.long())
+		  total = total + 1
+			
+      # Se precisão for igual ao label correto, 
+      # adiciona 1 a correct (que conta as previsões corretas).
+		  if previsao == label_teste: 
+		    correct = correct + 1
+		
+	  test_loss = test_loss/len(loader_test)  # Calcula o erro para o teste.
+
+	  acc = (correct/total)*100  # Calcula a acurácia.
+
+
+  return train_loss, test_loss, acc
+  
+  START = time.time() # Obtém o tempo de início do treinamento.
+
+list_train_loss = []
+list_test_loss = []
+list_acc = []
+time1epoch = 0
+
+lr = 0.001  # O learning rate utilizado para treino.
+epochs = 15 # O número de épocas que será treinado.
+optimizer, criterion = define(model, lr) # Define o erro e algoritmo de otimização.
+
+for epoch in range(1, epochs+1):
+
+  start = time.time() # Início do tempo gasto em cada época.
+  
+  # Executa o treinamento.
+  train_loss, test_loss, acc = train_test(model, loader_train, loader_test)
+  
+  end = time.time()  # Fim do tempo gasto em cada época.
+
+  # Dados para plotar gráficos posteriormente.
+  list_train_loss.append(train_loss), list_test_loss.append(test_loss), list_acc.append(acc)
+
+  Time = end - start
+  if epoch == 1:
+    # Tempo gasto na primeira época, que costuma apresentar 
+    # certa lentidão para começar, às vezes.
+    time1epoch = Time  
+
+  # Printa as informações de cada época.
+  if epoch < 10:
+    print('Epoch: ', epoch ,' loss: {:.4f}'.format(test_loss.item()), ' Accuracy: {:.2f}'.format(acc), ' Time spent this epoch: {:.2f}'.format(Time), 'seconds.')
+  else:
+    print('Epoch:', epoch ,' loss: {:.4f}'.format(test_loss.item()), ' Accuracy: {:.2f}'.format(acc), ' Time spent this epoch: {:.2f}'.format(Time), 'seconds.')
+
+END = time.time() # Obtém o tempo de fim do treinamento.
+
+print()
+TIME = (END - START) - time1epoch  # Tempo total, sem contar a primeira época.
+print('\n Time spent during training, excluding first epoch: {:.2f}'.format(TIME), 'seconds.')
+
+
+# Plota os gráficos de erro e acurácia vs nº de épocas.
+
+fig, axs = pyplot.subplots(2, figsize=(15,8))
+axs[0].plot(range(1, epochs+1), list_train_loss,label="Train loss") #Plota o erro de treino X epocas
+axs[0].plot(range(1, epochs+1), list_test_loss, label="Test loss") #Plota o erro de teste x epocas
+axs[0].set(xticks=range(1, epochs+1))
+axs[0].set_title('Losses x Epochs') #Define o título
+axs[0].set(xlabel='Epochs') #Define o nome do eixo x
+axs[0].set(ylabel='Losses') #Define o nome do eixo y
+axs[0].legend() #Mostra a legenda
+axs[0].grid(True) #Mostra a grade
+
+
+axs[1].plot(range(1, epochs+1), list_acc, label='Accuracy') #Plota a acuracia para erro de 1 graus x epocas
+axs[1].set(xticks=range(1, epochs+1))
+axs[1].set_title('Accuracy x epochs') #Define o título
+axs[1].set(xlabel='Epochs') #Define o nome do eixo x
+axs[1].set(ylabel='Accuracy (%)') #Define o nome do eixo y
+axs[1].legend(loc='lower right') #Mostra a legenda
+axs[1].grid(True) #Mostra a grade
+
+pyplot.tight_layout()
+
+
+# RODAR ESSA CÉLULA APENAS SE A ACURÁCIA FOR MAIOR QUE 98.99%
+
+# Salvar o modelo.
+torch.save(model, '/content/drive/My Drive/IMLDL/Desafio Final/model.pt')
+
+def predict(model,x):
+
+    out = model(x)  # Obtém o feedforward dos dados.
+    out = torch.argmax(out)  # Obtém o índice do maior valor da saída.
+    out = int(out)  # Transforma em inteiro, como pede o enunciado.
+    
+    return out
+    
+    
+# Testando se a função predict está correta.
+k=0
+correct = 0
+
+model.eval() # Coloca em modo de avaliação.
+
+with torch.no_grad(): # Não calcular gradiente.
+
+  for imagem_teste, label_teste in loader_valid:
+    # Coloca as imagens e labels na GPU, se possível.
+    imagem_teste, label_teste = imagem_teste.float().to(device), label_teste.to(device)
+    pred = predict(model,imagem_teste)
+    if pred == int(label_teste):
+      correct += 1
+
+    # Printa a previsão e o label alvo.  
+    print('Predict = ', pred, '| Target = ',label_teste) 
+    k += 1
+    if k == len(loader_valid):
+      print(f'\nShape da entrada: {imagem_teste.shape}')  # Garantindo que o shape de entrada está de acordo com o enunciado.
+      print(f'Acurácia para os {k} dados: {correct*100/k}%') # Calcula a acurácia, para avaliação final do modelo.
+      break
